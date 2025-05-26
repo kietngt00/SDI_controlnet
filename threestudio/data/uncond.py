@@ -107,7 +107,6 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
         self.first_view_azimuth = 0.0
         self.first_view_elevation = 15.0
         self.test_distance = 2.0
-        self.conditional_view_tolerance = 2.0  # degrees
         self.conditional_image  = Image.open("/data2/kietngt00/score-distillation-via-inversion/data/sketch/a_baby_penguin_wearing_a_blue_hat.png").convert("RGB").resize((self.width, self.height))
 
     def update_step(self, epoch: int, global_step: int, on_load_weights: bool = False):
@@ -148,51 +147,81 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
         # ]
 
     def collate(self, batch) -> Dict[str, Any]:
-        # Sample more around azimuth=0 and elevation=15 using a mixture of Gaussians and uniform
-        bias_prob = 0.2  # Probability to sample from the biased (Gaussian) distribution
-        batch_size = self.batch_size
-
+        bias_prob = 0.5
         is_first_view = random.random() < bias_prob
 
-        # Elevation sampling
-        elevation_deg = torch.empty(batch_size)
-        for i in range(batch_size):
-            if is_first_view:
-                # Gaussian around 15 deg, stddev=3
-                # elevation_deg[i] = float(np.clip(np.random.normal(15.0, std), self.elevation_range[0], self.elevation_range[1]))
-                elevation_deg[i] = 15
-            else:
-                # Uniform in range
-                elevation_deg[i] = float(torch.rand(1) * (self.elevation_range[1] - self.elevation_range[0]) + self.elevation_range[0])
-        elevation = elevation_deg * math.pi / 180
+        # sample elevation angles
+        elevation_deg: Float[Tensor, "B"]
+        elevation: Float[Tensor, "B"]
+        if is_first_view:
+            elevation_deg = torch.full(
+                (self.batch_size,), self.first_view_elevation
+            )
+            elevation = elevation_deg * math.pi / 180
+        elif random.random() < 0.5:
+            # sample elevation angles uniformly with a probability 0.5 (biased towards poles)
+            elevation_deg = (
+                torch.rand(self.batch_size)
+                * (self.elevation_range[1] - self.elevation_range[0])
+                + self.elevation_range[0]
+            )
+            elevation = elevation_deg * math.pi / 180
+        else:
+            # otherwise sample uniformly on sphere
+            elevation_range_percent = [
+                self.elevation_range[0] / 180.0 * math.pi,
+                self.elevation_range[1] / 180.0 * math.pi,
+            ]
+            # inverse transform sampling
+            elevation = torch.asin(
+                (
+                    torch.rand(self.batch_size)
+                    * (
+                        math.sin(elevation_range_percent[1])
+                        - math.sin(elevation_range_percent[0])
+                    )
+                    + math.sin(elevation_range_percent[0])
+                )
+            )
+            elevation_deg = elevation / math.pi * 180.0
 
-        # Azimuth sampling
-        azimuth_deg = torch.empty(batch_size)
-        for i in range(batch_size):
-            if is_first_view:
-                # Gaussian around 0 deg, stddev=10
-                # azimuth_deg[i] = float(np.clip(np.random.normal(0.0, std), self.azimuth_range[0], self.azimuth_range[1]))
-                azimuth_deg[i] = 0.
-            else:
-                # Uniform in range
-                azimuth_deg[i] = float(torch.rand(1) * (self.azimuth_range[1] - self.azimuth_range[0]) + self.azimuth_range[0])
+        # sample azimuth angles from a uniform distribution bounded by azimuth_range
+        azimuth_deg: Float[Tensor, "B"]
+        if is_first_view:
+            azimuth_deg = torch.full((self.batch_size,), self.first_view_azimuth)
+        elif self.cfg.batch_uniform_azimuth:
+            # ensures sampled azimuth angles in a batch cover the whole range
+            azimuth_deg = (
+                torch.rand(self.batch_size) + torch.arange(self.batch_size)
+            ) / self.batch_size * (
+                self.azimuth_range[1] - self.azimuth_range[0]
+            ) + self.azimuth_range[
+                0
+            ]
+        else:
+            # simple random sampling
+            azimuth_deg = (
+                torch.rand(self.batch_size)
+                * (self.azimuth_range[1] - self.azimuth_range[0])
+                + self.azimuth_range[0]
+            )
         azimuth = azimuth_deg * math.pi / 180
 
-
-        # Camera distance sampling
-        camera_distances = torch.empty(batch_size)
-        for i in range(batch_size):
-            if is_first_view:
-                # Gaussian around mean_distance
-                camera_distances[i] = self.test_distance
-            else:
-                # Uniform in range
-                camera_distances[i] = float(torch.rand(1) 
-                                            * (self.camera_distance_range[1] - self.camera_distance_range[0]) 
-                                            + self.camera_distance_range[0])
-
+        # sample distances from a uniform distribution bounded by distance_range
+        if is_first_view:
+            camera_distances: Float[Tensor, "B"] = torch.full(
+                (self.batch_size,), self.test_distance
+            )
+        else:
+            camera_distances: Float[Tensor, "B"] = (
+                torch.rand(self.batch_size)
+                * (self.camera_distance_range[1] - self.camera_distance_range[0])
+                + self.camera_distance_range[0]
+            )
 
         # convert spherical coordinates to cartesian coordinates
+        # right hand coordinate system, x back, y right, z up
+        # elevation in (-90, 90), azimuth from +x to +y in (-180, 180)
         camera_positions: Float[Tensor, "B 3"] = torch.stack(
             [
                 camera_distances * torch.cos(elevation) * torch.cos(azimuth),
@@ -210,37 +239,63 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
         ].repeat(self.batch_size, 1)
 
         # sample camera perturbations from a uniform distribution [-camera_perturb, camera_perturb]
-        camera_perturb: Float[Tensor, "B 3"] = (
-            torch.rand(self.batch_size, 3) * 2 * self.cfg.camera_perturb
-            - self.cfg.camera_perturb
-        )
+        if is_first_view:
+            camera_perturb: Float[Tensor, "B 3"] = torch.zeros(
+                (self.batch_size, 3), dtype=torch.float32
+            )
+        else:
+            camera_perturb: Float[Tensor, "B 3"] = (
+                torch.rand(self.batch_size, 3) * 2 * self.cfg.camera_perturb
+                - self.cfg.camera_perturb
+            )
         camera_positions = camera_positions + camera_perturb
         # sample center perturbations from a normal distribution with mean 0 and std center_perturb
-        center_perturb: Float[Tensor, "B 3"] = (
-            torch.randn(self.batch_size, 3) * self.cfg.center_perturb
-        )
+        if is_first_view:
+            center_perturb: Float[Tensor, "B 3"] = torch.zeros(
+                (self.batch_size, 3), dtype=torch.float32
+            )
+        else:
+            center_perturb: Float[Tensor, "B 3"] = (
+                torch.randn(self.batch_size, 3) * self.cfg.center_perturb
+            )
         center = center + center_perturb
         # sample up perturbations from a normal distribution with mean 0 and std up_perturb
-        up_perturb: Float[Tensor, "B 3"] = (
-            torch.randn(self.batch_size, 3) * self.cfg.up_perturb
-        )
+        if is_first_view:
+            up_perturb: Float[Tensor, "B 3"] = torch.zeros(
+                (self.batch_size, 3), dtype=torch.float32
+            )
+        else:
+            up_perturb: Float[Tensor, "B 3"] = (
+                torch.randn(self.batch_size, 3) * self.cfg.up_perturb
+            )
         up = up + up_perturb
 
         # sample fovs from a uniform distribution bounded by fov_range
-        fovy_deg: Float[Tensor, "B"] = (
-            torch.rand(self.batch_size) * (self.fovy_range[1] - self.fovy_range[0])
-            + self.fovy_range[0]
-        )
+        if is_first_view:
+            fovy_deg: Float[Tensor, "B"] = torch.full_like(
+                elevation_deg, self.cfg.eval_fovy_deg
+            )
+        else:
+            fovy_deg: Float[Tensor, "B"] = (
+                torch.rand(self.batch_size) * (self.fovy_range[1] - self.fovy_range[0])
+                + self.fovy_range[0]
+            )
         fovy = fovy_deg * math.pi / 180
 
         # sample light distance from a uniform distribution bounded by light_distance_range
-        light_distances: Float[Tensor, "B"] = (
-            torch.rand(self.batch_size)
-            * (self.cfg.light_distance_range[1] - self.cfg.light_distance_range[0])
-            + self.cfg.light_distance_range[0]
-        )
-
-        if self.cfg.light_sample_strategy == "dreamfusion":
+        if is_first_view:
+            light_distances: Float[Tensor, "B"] = torch.full(
+                (self.batch_size,), self.cfg.eval_camera_distance
+            )
+        else:
+            light_distances: Float[Tensor, "B"] = (
+                torch.rand(self.batch_size)
+                * (self.cfg.light_distance_range[1] - self.cfg.light_distance_range[0])
+                + self.cfg.light_distance_range[0]
+            )
+        if is_first_view:
+            light_positions: Float[Tensor, "B 3"] = camera_positions
+        elif self.cfg.light_sample_strategy == "dreamfusion":
             # sample light direction from a normal distribution with mean camera_position and std light_position_perturb
             light_direction: Float[Tensor, "B 3"] = F.normalize(
                 camera_positions
@@ -333,7 +388,7 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
             "width": self.width,
             "fovy": self.fovy,
             "proj_mtx": self.proj_mtx,
-            "condition": self.conditional_image if is_first_view else None,  # Add this field if needed
+            "condition": self.conditional_image if is_first_view else None
         }
 
 
@@ -345,8 +400,10 @@ class RandomCameraDataset(Dataset):
 
         if split == "val":
             self.n_views = self.cfg.n_val_views
+            self.conditional_image = Image.open("/data2/kietngt00/score-distillation-via-inversion/data/sketch/a_baby_penguin_wearing_a_blue_hat.png").convert("RGB")
         else:
             self.n_views = self.cfg.n_test_views
+            self.conditional_image = None
 
         azimuth_deg: Float[Tensor, "B"]
         if self.split == "val":
@@ -457,6 +514,7 @@ class RandomCameraDataset(Dataset):
     def collate(self, batch):
         batch = torch.utils.data.default_collate(batch)
         batch.update({"height": self.cfg.eval_height, "width": self.cfg.eval_width})
+        batch['condition'] = self.conditional_image if self.split == "val" else None
         return batch
 
 
