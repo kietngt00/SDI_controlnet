@@ -9,4 +9,5 @@ from . import (
     zero123_guidance,
     zero123_unified_guidance,
     stable_diffusion_sdi_guidance,
+    controlnet_sdi_guidance
 )

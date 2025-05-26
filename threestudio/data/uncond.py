@@ -22,6 +22,7 @@ from threestudio.utils.ops import (
     get_rays,
 )
 from threestudio.utils.typing import *
+from PIL import Image
 
 
 @dataclass
@@ -327,6 +328,14 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
         mvp_mtx: Float[Tensor, "B 4 4"] = get_mvp_matrix(c2w, self.proj_mtx)
         self.fovy = fovy
 
+        conditional_image = None
+        # Check for each item in the batch if azimuth_deg == 0 (or close to 0)
+        # This is just an example for the first item:
+        # if torch.isclose(azimuth_deg, torch.tensor(0.0), atol=1e-3) and torch.isclose(elevation_deg, torch.tensor(0.0), atol=1e-3):
+        if azimuth_deg[0] <= 1. and azimuth_deg[0] >= -1. and elevation_deg[0] <= 1. and elevation_deg[0] >= -1.:
+            # Set your conditional image here, e.g.:
+            conditional_image  = Image.open("/data2/kietngt00/score-distillation-via-inversion/data/sketch/a_baby_penguin_wearing_a_blue_hat.png").convert("RGB").resize((self.width, self.height))
+
         return {
             "rays_o": rays_o,
             "rays_d": rays_d,
@@ -341,6 +350,7 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
             "width": self.width,
             "fovy": self.fovy,
             "proj_mtx": self.proj_mtx,
+            "condition": conditional_image,  # Add this field if needed
         }
 
 

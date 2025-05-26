@@ -41,3 +41,5 @@ git+https://github.com/openai/CLIP.git
 
 #controlnet
 controlnet_aux
+
+#pip install -U bitsandbytes
