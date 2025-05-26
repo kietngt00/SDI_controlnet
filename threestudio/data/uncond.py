@@ -106,8 +106,9 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
 
         self.first_view_azimuth = 0.0
         self.first_view_elevation = 15.0
+        self.test_distance = 2.0
         self.conditional_view_tolerance = 2.0  # degrees
-        self.conditional_image  = Image.open("/data2/kietngt00/SDI_controlnet/data/sketch/a_baby_penguin_wearing_a_blue_hat.png").convert("RGB").resize((self.width, self.height))
+        self.conditional_image  = Image.open("/data2/kietngt00/score-distillation-via-inversion/data/sketch/a_baby_penguin_wearing_a_blue_hat.png").convert("RGB").resize((self.width, self.height))
 
     def update_step(self, epoch: int, global_step: int, on_load_weights: bool = False):
         size_ind = bisect.bisect_right(self.resolution_milestones, global_step) - 1
@@ -148,16 +149,18 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
 
     def collate(self, batch) -> Dict[str, Any]:
         # Sample more around azimuth=0 and elevation=15 using a mixture of Gaussians and uniform
-        bias_prob = 0.5  # Probability to sample from the biased (Gaussian) distribution
+        bias_prob = 0.2  # Probability to sample from the biased (Gaussian) distribution
         batch_size = self.batch_size
-        std = 1.5
+
+        is_first_view = random.random() < bias_prob
 
         # Elevation sampling
         elevation_deg = torch.empty(batch_size)
         for i in range(batch_size):
-            if random.random() < bias_prob:
+            if is_first_view:
                 # Gaussian around 15 deg, stddev=3
-                elevation_deg[i] = float(np.clip(np.random.normal(15.0, std), self.elevation_range[0], self.elevation_range[1]))
+                # elevation_deg[i] = float(np.clip(np.random.normal(15.0, std), self.elevation_range[0], self.elevation_range[1]))
+                elevation_deg[i] = 15
             else:
                 # Uniform in range
                 elevation_deg[i] = float(torch.rand(1) * (self.elevation_range[1] - self.elevation_range[0]) + self.elevation_range[0])
@@ -166,20 +169,28 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
         # Azimuth sampling
         azimuth_deg = torch.empty(batch_size)
         for i in range(batch_size):
-            if random.random() < bias_prob:
+            if is_first_view:
                 # Gaussian around 0 deg, stddev=10
-                azimuth_deg[i] = float(np.clip(np.random.normal(0.0, std), self.azimuth_range[0], self.azimuth_range[1]))
+                # azimuth_deg[i] = float(np.clip(np.random.normal(0.0, std), self.azimuth_range[0], self.azimuth_range[1]))
+                azimuth_deg[i] = 0.
             else:
                 # Uniform in range
                 azimuth_deg[i] = float(torch.rand(1) * (self.azimuth_range[1] - self.azimuth_range[0]) + self.azimuth_range[0])
         azimuth = azimuth_deg * math.pi / 180
 
-        # sample distances from a uniform distribution bounded by distance_range
-        camera_distances: Float[Tensor, "B"] = (
-            torch.rand(batch_size)
-            * (self.camera_distance_range[1] - self.camera_distance_range[0])
-            + self.camera_distance_range[0]
-        )
+
+        # Camera distance sampling
+        camera_distances = torch.empty(batch_size)
+        for i in range(batch_size):
+            if is_first_view:
+                # Gaussian around mean_distance
+                camera_distances[i] = self.test_distance
+            else:
+                # Uniform in range
+                camera_distances[i] = float(torch.rand(1) 
+                                            * (self.camera_distance_range[1] - self.camera_distance_range[0]) 
+                                            + self.camera_distance_range[0])
+
 
         # convert spherical coordinates to cartesian coordinates
         camera_positions: Float[Tensor, "B 3"] = torch.stack(
@@ -307,15 +318,6 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
         )  # FIXME: hard-coded near and far
         mvp_mtx: Float[Tensor, "B 4 4"] = get_mvp_matrix(c2w, self.proj_mtx)
         self.fovy = fovy
-        
-        diff_azimuth = torch.abs(azimuth_deg - self.first_view_azimuth)
-        diff_elevation = torch.abs(elevation_deg - self.first_view_elevation)
-        is_first_view = (diff_azimuth < self.conditional_view_tolerance) & (diff_elevation < self.conditional_view_tolerance)
-
-        if torch.any(is_first_view):
-            conditional_image = self.conditional_image.resize((self.width, self.height))
-        else:
-            conditional_image = None
 
         return {
             "rays_o": rays_o,
@@ -331,7 +333,7 @@ class RandomCameraIterableDataset(IterableDataset, Updateable):
             "width": self.width,
             "fovy": self.fovy,
             "proj_mtx": self.proj_mtx,
-            "condition": conditional_image,  # Add this field if needed
+            "condition": self.conditional_image if is_first_view else None,  # Add this field if needed
         }
 
 

@@ -62,14 +62,14 @@ system:
   prompt_processor:
     pretrained_model_name_or_path: "stabilityai/stable-diffusion-2-1-base"
     prompt: ???
-    use_perp_neg: true
+    use_perp_neg: false
 
   guidance_type: "controlnet-sdi-guidance"
   guidance:
     pretrained_model_name_or_path: "stabilityai/stable-diffusion-2-1-base"
     controlnet_model_name_or_path: "thibaud/controlnet-sd21-scribble-diffusers"
     guidance_scale: 7.5
-    condition_scale: 1.0
+    condition_scale: 2.0
     weighting_strategy: sds
     min_step_percent: 0.25
     max_step_percent: 0.98
